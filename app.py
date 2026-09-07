@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import hashlib
+import tempfile
+from pathlib import Path
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -11,10 +13,12 @@ import streamlit as st
 from src.brain import score_book, simulate_discount
 from src.data import DATA_DIR, TwinBook, write_demo
 from src.history import customer_history, monthly_risk, monthly_sales
+from src.landing import DuckLanding, default_slice_sql, land_paths, land_zip_file
 from src.models import TwinModels, train_twin_models
 from src.pipeline import LAYER_CONTRACT, read_tabular, run_pipeline
 from src.report import twin_pdf
 from src.twin import CustomerTwin, twin_from_row
+from src.url_ingest import resolve_source
 from src.warehouse import run_sql
 
 st.set_page_config(
@@ -96,71 +100,192 @@ def _dark(fig: go.Figure) -> go.Figure:
     return fig
 
 
+def _parse_ids(text: str) -> list[str]:
+    return [p.strip() for p in text.replace(",", "\n").splitlines() if p.strip()]
+
+
+def _land_from_ui() -> tuple[DuckLanding, str]:
+    if not (DATA_DIR / "customers.csv").exists():
+        write_demo()
+    source = st.radio(
+        "How data enters DuckDB",
+        ["Demo book", "Upload files", "Upload ZIP", "URL (Drive / Kaggle / HTTPS)"],
+        horizontal=True,
+    )
+    if source == "Demo book":
+        land = land_paths(
+            {
+                "customers": str(DATA_DIR / "customers.csv"),
+                "sales": str(DATA_DIR / "sales.csv"),
+                "behavior": str(DATA_DIR / "behavior.csv"),
+            }
+        )
+        return land, "demo book"
+    if source == "Upload files":
+        c1, c2, c3 = st.columns(3)
+        kinds = ["csv", "tsv", "xlsx"]
+        up_c = c1.file_uploader("customers (master)", type=kinds, key="c")
+        up_s = c2.file_uploader("sales (purchases)", type=kinds, key="s")
+        up_b = c3.file_uploader("behavior (optional)", type=kinds, key="b")
+        if not (up_c and up_s):
+            st.info("Upload customers + sales. ZIP/URL for files bigger than the browser limit.")
+            st.stop()
+        land = DuckLanding()
+        land.attach_frame("customers", read_tabular(up_c))
+        land.attach_frame("sales", read_tabular(up_s))
+        if up_b:
+            land.attach_frame("behavior", read_tabular(up_b))
+        return land, "upload files"
+    if source == "Upload ZIP":
+        z = st.file_uploader("ZIP with customers*.csv + sales*.csv (+ behavior*.csv)", type=["zip"], key="zip")
+        st.caption("Browser ZIP max ~200 MB. For ~2 GB use a Drive/Kaggle/HTTPS link below.")
+        if z is None:
+            st.stop()
+        tmp = Path(tempfile.mkstemp(prefix="keel-zip-", suffix=".zip")[1])
+        tmp.write_bytes(z.getvalue())
+        return land_zip_file(tmp), "zip"
+    st.caption(
+        "DuckDB reads the file; SQL slice runs *before* pandas/clean/twin. "
+        "Kaggle dataset pages need KAGGLE_USERNAME + KAGGLE_KEY secrets, or paste a direct file URL."
+    )
+    u_c = st.text_input("Customers URL")
+    u_s = st.text_input("Sales URL (or a single ZIP URL in this box and leave others empty)")
+    u_b = st.text_input("Behavior URL (optional)")
+    if not u_s.strip():
+        st.info("Paste at least a sales CSV/Parquet/ZIP URL.")
+        st.stop()
+    if not u_c.strip():
+        path, _meta = resolve_source(u_s.strip())
+        peek = Path(path)
+        if str(path).lower().endswith(".zip") or zipfile_is_zip(peek):
+            return land_zip_file(peek), "url-zip"
+        raise ValueError("Customers URL is required unless the sales URL is a ZIP that contains both files.")
+    paths: dict[str, str] = {}
+    if u_c.strip():
+        paths["customers"], _ = resolve_source(u_c.strip())
+    paths["sales"], _ = resolve_source(u_s.strip())
+    if u_b.strip():
+        paths["behavior"], _ = resolve_source(u_b.strip())
+    return land_paths(paths), "url"
+
+
+def zipfile_is_zip(path: Path) -> bool:
+    import zipfile
+
+    try:
+        return zipfile.is_zipfile(path)
+    except OSError:
+        return False
+
+
 def _ingest() -> TwinBook:
     st.markdown(
         '<div class="hero"><h1>Customer Digital Twin</h1>'
-        "<p>Forge-style data plane (DuckDB · raw vs clean · SQL) feeding an unchanged twin brain. "
-        "Factory wall is OEE / Forge / PDM. This is the market wall.</p></div>",
+        "<p>Land in DuckDB (files / ZIP / Drive-Kaggle URL) → SQL slice by time, region, IDs "
+        "→ clean layers → unchanged twin brain. 2 GB stays in the warehouse; only the slice is scored.</p></div>",
         unsafe_allow_html=True,
     )
-    c1, c2, c3 = st.columns(3)
-    kinds = ["csv", "tsv", "xlsx"]
-    up_c = c1.file_uploader("1 · customers (master)", type=kinds, key="c")
-    up_s = c2.file_uploader("2 · sales (purchase sensors)", type=kinds, key="s")
-    up_b = c3.file_uploader("3 · behavior (optional live health)", type=kinds, key="b")
+    try:
+        land, source = _land_from_ui()
+    except Exception as exc:
+        st.error(str(exc))
+        st.stop()
 
-    if not (DATA_DIR / "customers.csv").exists():
-        write_demo()
+    n_c, n_s, n_b = land.rowcount("customers"), land.rowcount("sales"), land.rowcount("behavior")
+    k1, k2, k3 = st.columns(3)
+    k1.metric("DuckDB customers (raw)", f"{n_c:,}")
+    k2.metric("DuckDB sales (raw)", f"{n_s:,}")
+    k3.metric("DuckDB behaviour (raw)", f"{n_b:,}")
+
+    st.markdown("##### SQL slice — choose what enters clean + twin")
+    s1, s2, s3 = st.columns(3)
+    date_from = s1.text_input("Sales from (YYYY-MM-DD)", "2024-01-01")
+    date_to = s2.text_input("Sales to (YYYY-MM-DD)", "2026-09-07")
+    id_text = s3.text_area("Customer IDs (optional, comma or newline)", height=70)
+    regions_avail = land.distinct("customers", "region") or land.distinct("sales", "region")
+    regions = st.multiselect("Regions (optional)", options=regions_avail, default=[])
+    advanced = st.checkbox("Advanced: write SQL per feed (overrides date/region/ID filters)")
+    sql_c = sql_s = sql_b = ""
+    if advanced:
+        sql_c = st.text_area("Slice customers", value=default_slice_sql("customers"), height=90)
+        sql_s = st.text_area("Slice sales", value=default_slice_sql("sales"), height=90)
+        sql_b = st.text_area("Slice behavior", value=default_slice_sql("behavior"), height=90) if "behavior" in land.feeds else ""
+
+    apply = st.button("Apply slice → clean → twin", type="primary")
+    if not apply and source != "demo book":
+        st.info("Landed in DuckDB. Set the slice, then apply. Demo book auto-runs a default slice.")
+        st.stop()
 
     try:
-        if up_c and up_s:
-            customers = read_tabular(up_c)
-            sales = read_tabular(up_s)
-            behavior = read_tabular(up_b) if up_b else None
-            source = "upload"
-        elif up_c or up_s or up_b:
-            st.error("Upload customers + sales. Behaviour is optional (inferred from last purchase).")
-            st.stop()
+        ids = _parse_ids(id_text)
+        if advanced and sql_s.strip():
+            sales_df = land.slice_sql(sql_s)
+            customers_df = land.slice_sql(sql_c) if sql_c.strip() else land.slice_sql("SELECT * FROM raw_customers LIMIT 100000")
+            behavior_df = land.slice_sql(sql_b) if sql_b.strip() and "behavior" in land.feeds else None
         else:
-            customers = pd.read_csv(DATA_DIR / "customers.csv")
-            sales = pd.read_csv(DATA_DIR / "sales.csv")
-            behavior = pd.read_csv(DATA_DIR / "behavior.csv")
-            source = "demo book"
-        pipe = run_pipeline(customers, sales, behavior)
-    except (ValueError, OSError) as exc:
+            sales_df = land.slice_sales(
+                date_from=date_from or None,
+                date_to=date_to or None,
+                regions=list(regions) or None,
+                customer_ids=ids or None,
+            )
+            if ids:
+                listed = ", ".join("'" + i.replace("'", "''") + "'" for i in ids)
+                customers_df = land.slice_sql(
+                    f"SELECT * FROM raw_customers WHERE CAST(customer_id AS VARCHAR) IN ({listed}) LIMIT 100000"
+                )
+            elif regions:
+                listed = ", ".join("'" + r.replace("'", "''") + "'" for r in regions)
+                try:
+                    customers_df = land.slice_sql(
+                        f"SELECT * FROM raw_customers WHERE CAST(region AS VARCHAR) IN ({listed}) LIMIT 100000"
+                    )
+                except Exception:
+                    customers_df = land.slice_sql("SELECT * FROM raw_customers LIMIT 100000")
+            else:
+                customers_df = land.slice_sql("SELECT * FROM raw_customers LIMIT 100000")
+            if "behavior" in land.feeds:
+                if ids:
+                    listed = ", ".join("'" + i.replace("'", "''") + "'" for i in ids)
+                    behavior_df = land.slice_sql(
+                        f"SELECT * FROM raw_behavior WHERE CAST(customer_id AS VARCHAR) IN ({listed}) LIMIT 100000"
+                    )
+                else:
+                    behavior_df = land.slice_sql("SELECT * FROM raw_behavior LIMIT 100000")
+            else:
+                behavior_df = None
+        pipe = run_pipeline(customers_df, sales_df, behavior_df)
+    except Exception as exc:
         st.error(str(exc))
         st.stop()
 
     book = pipe.book
     st.session_state["pipeline"] = pipe
     m1, m2, m3, m4, m5 = st.columns(5)
-    m1.metric("Raw master rows", f"{len(pipe.customers.raw):,}")
-    m2.metric("Clean sales events", f"{len(pipe.sales.clean):,}")
-    m3.metric("Twins (gold join)", f"{len(book.panel):,}")
+    m1.metric("Sliced master", f"{len(pipe.customers.raw):,}")
+    m2.metric("Sliced sales", f"{len(pipe.sales.raw):,}")
+    m3.metric("Twins (gold)", f"{len(book.panel):,}")
     n_rej = len(pipe.customers.rejects) + len(pipe.sales.rejects) + len(pipe.behavior.rejects)
     m4.metric("Reject rows", f"{n_rej:,}")
     m5.metric("Behaviour", "inferred" if pipe.behavior_source == "inferred_from_sales" else "uploaded")
-    st.caption(f"Source: {source} · join `customer_id` · unmatched {book.dropped_ids:,} · {pipe.gold_note}")
+    st.caption(f"Source: {source} · DuckDB slice then clean · unmatched {book.dropped_ids:,} · {pipe.gold_note}")
 
-    with st.expander("Data plane · 8 layers · raw vs clean · DuckDB SQL (Forge v2 slice)", expanded=False):
-        st.write("Contract: " + " → ".join(LAYER_CONTRACT))
+    with st.expander("Data plane · layers · raw vs clean · SQL lab", expanded=False):
+        st.write("Contract: land → SQL slice → " + " → ".join(LAYER_CONTRACT))
         st.dataframe(pipe.layer_rows, use_container_width=True, hide_index=True)
-        t1, t2, t3, t4 = st.tabs(["Raw vs clean", "Rejects", "SQL lab", "Gold panel"])
+        t1, t2, t3, t4 = st.tabs(["Raw vs clean", "Rejects", "SQL lab (clean tables)", "Gold panel"])
         with t1:
             feed = st.selectbox("Feed", ["customers", "sales", "behavior"])
             left, right = st.columns(2)
             raw_map = {"customers": pipe.customers.raw, "sales": pipe.sales.raw, "behavior": pipe.behavior.raw}
             clean_map = {"customers": pipe.customers.clean, "sales": pipe.sales.clean, "behavior": pipe.behavior.clean}
-            left.caption("RAW (untouched)")
+            left.caption("SLICE entering clean")
             left.dataframe(raw_map[feed].head(40), use_container_width=True)
-            right.caption("CLEAN (rules applied)")
+            right.caption("CLEAN")
             right.dataframe(clean_map[feed].head(40), use_container_width=True)
         with t2:
-            st.caption("Customers rejects")
             st.dataframe(pipe.customers.rejects.head(30), use_container_width=True)
-            st.caption("Sales rejects")
             st.dataframe(pipe.sales.rejects.head(30), use_container_width=True)
-            st.caption("Behaviour rejects")
             st.dataframe(pipe.behavior.rejects.head(30), use_container_width=True)
         with t3:
             default_sql = (
@@ -173,7 +298,7 @@ def _ingest() -> TwinBook:
                     result, engine = run_sql(sql, pipe.tables)
                     st.caption(f"engine: {engine}")
                     st.dataframe(result, use_container_width=True)
-                except Exception as exc:  # show analyst-facing SQL errors
+                except Exception as exc:
                     st.error(str(exc))
         with t4:
             st.dataframe(book.panel.head(40), use_container_width=True)

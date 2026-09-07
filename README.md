@@ -3,16 +3,18 @@
 Sales + churn as **one twin**. Forge-style **data plane** (DuckDB, raw vs clean, SQL) feeds an unchanged **twin brain**. Same company story as OEE / Forge / PDM — this is the market wall.
 
 ```text
-upload customers + sales [+ optional behavior]
+Demo book | upload files | ZIP | Drive / Kaggle / HTTPS URL
         │
         ▼
-  DuckDB land RAW  →  8-layer CLEAN  →  GOLD join on customer_id
+  DuckDB land RAW  →  SQL slice (time / region / IDs)  →  8-layer CLEAN  →  GOLD
         │
         ▼
   history charts  →  Sales Twin + Churn Twin + Next Best Action
 ```
 
 Demo CSVs in `data/` load automatically so the dashboard is not empty. Behaviour file is optional: if omitted, inactivity is **derived from last purchase** (logins are not invented).
+
+**Large files (~2 GB):** do not upload through the browser (200 MB cap). Put a ZIP or CSV on Google Drive / Kaggle / HTTPS. DuckDB lands the file, you SQL-slice by date / region / customer IDs, and only the slice is cleaned and scored.
 
 ## Run locally
 
@@ -23,7 +25,7 @@ pip install -r requirements.txt
 streamlit run app.py --server.port 8512
 ```
 
-Upload up to **200 MB** per file (csv / tsv / xlsx). Expand **Data plane** for layer log, raw vs clean, rejects, and a read-only SQL lab.
+Sources: demo book, three files (csv / tsv / xlsx, **200 MB** each), a ZIP (`customers*.csv` + `sales*.csv`, optional `behavior*.csv`), or URLs. Expand **Data plane** for layer log, raw vs clean, rejects, and a read-only SQL lab.
 
 ## CSV contracts
 
