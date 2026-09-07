@@ -1,12 +1,12 @@
 # Keel
 
-Sales + churn operating system. Pipeline, MRR ledger, and an explainable risk queue in one workspace.
+Sales + churn as **one Customer Twin**. Left is what they buy (LTV, forecast). Right is whether they leave. Center is the decision — retain with offer X, expand, nurture, or let go.
 
-This repository is in **planning lock**. The product decision is [`docs/PDM-001-keel.md`](docs/PDM-001-keel.md). Application code starts only after that memo.
+This repository is in **planning lock**. Read [`docs/PDM-001-keel.md`](docs/PDM-001-keel.md) then [`docs/PDM-002-customer-twin.md`](docs/PDM-002-customer-twin.md). Application code starts only after those memos.
 
 ## What Keel is
 
-Keel is a B2B SaaS product for founder-led teams who need to see **what they sold**, **what is leaking**, and **who works the risk** — without stitching a CRM, a spreadsheet, and a churn notebook.
+Keel is a B2B SaaS for the **customer** layer (CRM / CS / marketing decisioning). It does not ship two graphs. Every account is a living twin with two inference heads and one policy.
 
 It is not a Streamlit lab and not a CSV dashboard.
 

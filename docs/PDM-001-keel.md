@@ -1,10 +1,10 @@
 # PDM-001 — Keel
 
-**Status:** Accepted (planning lock)  
+**Status:** Accepted (planning lock) — **amended by [PDM-002 — Customer Twin](./PDM-002-customer-twin.md)**  
 **Owner:** CEO  
-**Product:** Keel — Sales + Churn operating system  
+**Product:** Keel — Sales + Churn as one Customer Twin  
 **Bar:** Forge v2 + PDM standards  
-**Build:** not started until this memo is the source of truth
+**Build:** not started until PDM-001 and PDM-002 are the source of truth
 
 This is the product decision memo. Features, stack, and repo layout follow this file. If a later idea is not in here, it does not ship in v1.
 
@@ -30,9 +30,9 @@ Sales tools celebrate logos. Finance tools report churn after the invoice alread
 
 The gap: **nobody owns the account after close with a shared number.**
 
-Keel’s job is that number: **at-risk MRR**, explained, assigned, and worked.
+Keel’s job is that number: **at-risk MRR**, explained, assigned, and worked — **on the same object as LTV and forecast**, not on a second graph.
 
-If Keel only predicts “this customer looks like churn,” it is a science fair. If Keel lets a team **queue, explain, and work** revenue risk next to the pipeline, it is a product.
+If Keel only predicts “this customer looks like churn,” it is a science fair. If it shows sales in one chart and churn in another, it is every other CRM. If a team opens **one Customer Twin** and gets a decision (`Retain with offer X`), it is a product. See PDM-002.
 
 ---
 
@@ -43,7 +43,7 @@ These are the standards. Anything that fails them is out of v1.
 | Standard | What it means on Keel |
 | --- | --- |
 | Spec before code | This PDM is merged before app code. |
-| One domain language | Account, subscription, opportunity, MRR movement, health, risk, playbook. No synonym soup. |
+| One domain language | Account, Customer Twin, Sales Twin, Churn Twin, Decision, subscription, opportunity, MRR movement. No synonym soup. |
 | Multi-tenant from day one | Every row belongs to a workspace. Demo data is a workspace, not a global table. |
 | Workflows over dashboards | A screen must end in an action (open account, assign owner, run playbook). Charts are supporting. |
 | Explainable intelligence | A risk score must show drivers. No black-box “82% churn” with no cause. |
@@ -84,21 +84,22 @@ These are the standards. Anything that fails them is out of v1.
 
 Keel sits between **sales CRM** and **customer success**, with a finance-grade revenue spine.
 
-| Product | What they own | What we refuse to copy in v1 |
+| Product | What they own | What we refuse to copy |
 | --- | --- | --- |
 | HubSpot / Pipedrive | Pipeline | Full CRM, marketing, email |
 | ChartMogul / Baremetrics | SaaS metrics | Billing ingestion as the whole product |
 | Gainsight / ChurnZero / Vitally | CS health + playbooks | Enterprise complexity, 50 integrations |
-| **Keel** | Pipeline + MRR ledger + explainable risk queue | Everything else |
+| Commodity dashboards | Two graphs (sales vs churn) | That split — Keel’s unit is the Customer Twin |
+| **Keel** | Sales Twin + Churn Twin + Decision on one identity | Everything else |
 
-**Pitch:** *Keel keeps the revenue keel straight — what you sold, what is leaking, and who works it today.*
+**Pitch:** *One twin per customer. Left is what they buy. Right is whether they leave. Center is the play.*
 
 ---
 
 ## 6. North-star and product metrics
 
-**North-star:** At-risk MRR worked this week  
-Definition: sum of MRR on accounts in the risk queue that received an action (note, owner change, playbook run) in the last 7 days.
+**North-star:** Twin decisions accepted this week (retain / expand), weighted by risk-adjusted LTV.  
+Operational proxy: at-risk MRR on twins where the Combined Decision was accepted.
 
 **Board metrics (must reconcile on the Overview):**
 
@@ -126,7 +127,9 @@ A CS or sales user can log into a **demo workspace**, see live economics, open t
 - Health snapshots (usage, tickets, payment failures, recency)
 - Explainable risk engine (rules + score 0–100 + drivers)
 - Risk queue (filter, sort, assign)
-- Account 360 (sales + billing + health + activity)
+- Customer Twin snapshot (sales lobe + churn lobe + decision, same `as_of`)
+- Twin page: Sales Twin \| Combined Decision \| Churn Twin
+- Twin board (value × risk), not two unrelated charts
 - Overview cockpit (the board metrics above)
 - Seed dataset that looks like a real SaaS book of business
 - Empty, loading, and error states
@@ -163,8 +166,10 @@ Workspace
         ├── MrrMovement          // new | expansion | contraction | churn | reactivation
         ├── HealthSnapshot       // as-of date, usage, tickets, payments
         ├── RiskScore            // 0-100, drivers[], model_version
+        ├── CustomerTwinSnapshot // sales + churn + decision, same as_of
+        ├── TwinDecision         // accepted | edited | dismissed
         └── Activity             // note | owner_change | playbook
-  └── Playbook                   // template: failed payment, silent account, contraction
+  └── Playbook                   // offer catalog behind the decision policy
 ```
 
 **Invariants**
@@ -173,6 +178,8 @@ Workspace
 2. Every subscription change writes an `MrrMovement`. Totals are derived, never typed in by hand on Overview.
 3. A `RiskScore` is immutable once written. Recalc creates a new row (`model_version`).
 4. No query is valid without `workspace_id`.
+5. A twin snapshot always contains both lobes or it is invalid (PDM-002).
+6. `predicted_ltv` uses `p_churn` from the same snapshot.
 
 **Churn engine (v1) — explainable, not theatrical ML**
 
@@ -199,12 +206,12 @@ A later Python training kit can *fit weights* from labeled history. v1 ships wit
 
 | Route | User | Must do |
 | --- | --- | --- |
-| `/` | Exec | Board metrics + leak vs pipeline |
-| `/pipeline` | Sales | Open opps, stage value, won/lost |
-| `/accounts` | All | Search, segment, MRR, band |
-| `/accounts/[id]` | CS / Sales | 360 + drivers + log activity |
-| `/risk` | CS | Queue of watch/risk/critical, assign |
-| `/playbooks` | CS | Templates + last runs |
+| `/` | Exec | Twin board (LTV × risk) + NRR |
+| `/pipeline` | Sales | CRM pipeline that feeds the Sales Twin |
+| `/accounts` | All | Twins, sorted by expected value of action |
+| `/accounts/[id]` | CS / Sales | **Sales Twin \| Decision \| Churn Twin** |
+| `/risk` | CS | Twins whose decision is Retain or Let go |
+| `/playbooks` | CS | Offer catalog behind the decision policy |
 | `/settings` | Owner | Workspace, seed reset, roles |
 
 Desktop is the primary surface. Mobile is readable, not a redesign.
@@ -221,7 +228,7 @@ One repo. One web app. No second product.
 Browser
   └── Next.js (App Router, TypeScript, Tailwind, shadcn/ui)
         ├── Server actions / route handlers
-        ├── Domain (accounts, mrr, risk) — pure functions, tested
+        ├── Domain (ledger, sales twin, churn twin, decision policy) — pure functions, tested
         └── SQLite locally / Postgres when DATABASE_URL is set
 ```
 
@@ -290,11 +297,13 @@ Execute in this order. Do not start 2 before 1 is true.
 
 1. **Lock** — this PDM in git (this step).
 2. **Skeleton** — Next.js app, tenancy types, gitignore, README, env example.
-3. **Ledger** — Account / Subscription / MrrMovement + seed + tests that GRR/NRR reconcile.
-4. **Sales** — Opportunities + pipeline UI.
-5. **Risk** — health snapshots, scoring, risk queue, account 360.
-6. **Cockpit** — Overview that only uses ledger + risk, no extra fake KPIs.
+3. **Ledger + CRM pipeline** — opportunities → subscriptions → MRR.
+4. **Both twin heads** on the same `as_of` (pure functions, tests).
+5. **Decision policy + offer catalog** (value × risk matrix).
+6. **Customer Twin page** (left / center / right) + twin board.
 7. **Hardening** — empty/error, seed reset, README runbook, deploy config.
+
+Do not build a sales dashboard and a churn dashboard and combine later (PDM-002).
 
 GitHub: application code is pushed on the working branch. User connects a real GitHub repo from the New Project flow when ready. `.venv` stays on the home machine.
 
@@ -304,12 +313,12 @@ GitHub: application code is pushed on the working branch. User connects a real G
 
 A stranger can clone, run, open the demo workspace, and:
 
-1. Read NRR and at-risk MRR on Overview.
-2. Open `/risk` and see why an account is critical.
-3. Open that account and log a playbook activity.
-4. See pipeline coverage vs leak on the same product, not a second tool.
+1. On one account, read Sales Twin, Churn Twin, and the center decision without switching tabs.
+2. See why LTV is risk-adjusted (left uses right’s P(churn)).
+3. Accept or dismiss the offer; it writes back onto the twin.
+4. On Overview, see a value × risk board — not two unrelated graphs.
 
-Until those four are true, we are not “industry SaaS.” We are still a demo.
+Until those four are true, we shipped the old world.
 
 ---
 
@@ -323,5 +332,6 @@ Until those four are true, we are not “industry SaaS.” We are still a demo.
 | Python model in v1? | No. Explainable engine in-process. Optional `/ml` after. |
 | Real customer data? | Seed only. CSV import is v1.1 if needed. |
 | Product name? | **Keel**. |
+| Two graphs (sales vs churn)? | Forbidden. Customer Twin is the unit (PDM-002). |
 
-New scope requires **PDM-002**, not a drive-by feature.
+New scope requires **PDM-003**, not a drive-by feature.
