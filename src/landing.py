@@ -32,7 +32,12 @@ def classify_member(name: str) -> str | None:
     return None
 
 
-def extract_zip(zip_path: Path, dest: Path | None = None) -> dict[str, Path]:
+def extract_zip(
+    zip_path: Path,
+    dest: Path | None = None,
+    *,
+    require: tuple[str, ...] = ("customers", "sales"),
+) -> dict[str, Path]:
     dest = dest or Path(tempfile.mkdtemp(prefix="keel-zip-"))
     dest.mkdir(parents=True, exist_ok=True)
     found: dict[str, Path] = {}
@@ -47,13 +52,54 @@ def extract_zip(zip_path: Path, dest: Path | None = None) -> dict[str, Path]:
             with zf.open(info) as src, target.open("wb") as out:
                 out.write(src.read())
             found[feed] = target
-    missing = [f for f in ("customers", "sales") if f not in found]
+    missing = [f for f in require if f not in found]
     if missing:
         raise ValueError(
             "Zip needs files named like customers*.csv and sales*.csv "
             f"(optional behavior*.csv). Missing: {', '.join(missing)}."
         )
     return found
+
+
+def absorb_zip(
+    collected: dict[str, Path | pd.DataFrame],
+    zip_path: Path,
+    *,
+    slot: str | None = None,
+) -> None:
+    """Merge a ZIP into an upload bag. A pack ZIP fills empty feeds; a slot ZIP overwrites that feed."""
+    if slot is None:
+        collected.update(extract_zip(zip_path))
+        return
+    found = extract_zip(zip_path, require=())
+    if slot in found:
+        collected[slot] = found[slot]
+    if "customers" in found and "sales" in found:
+        for feed, path in found.items():
+            collected.setdefault(feed, path)
+        return
+    if slot not in found:
+        raise ValueError(
+            f"ZIP has no file matching {slot}*.csv. "
+            "Name files customers*.csv / sales*.csv (optional behavior*.csv), "
+            "or drop a full pack ZIP."
+        )
+
+
+def land_from_collected(collected: dict[str, Path | pd.DataFrame]) -> DuckLanding:
+    land = DuckLanding()
+    for feed, src in collected.items():
+        if feed not in ("customers", "sales", "behavior"):
+            continue
+        if isinstance(src, pd.DataFrame):
+            land.attach_frame(feed, src)
+        else:
+            land.attach_path(feed, str(src))
+    if "sales" not in land.feeds:
+        raise ValueError("Sales feed is required.")
+    if "customers" not in land.feeds:
+        raise ValueError("Customers master is required.")
+    return land
 
 
 def _from_clause(path: str) -> str:

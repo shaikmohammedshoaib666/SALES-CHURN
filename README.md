@@ -25,7 +25,7 @@ pip install -r requirements.txt
 streamlit run app.py --server.port 8512
 ```
 
-Sources: demo book, three files (csv / tsv / xlsx, **200 MB** each), a ZIP (`customers*.csv` + `sales*.csv`, optional `behavior*.csv`), or URLs. Expand **Data plane** for layer log, raw vs clean, rejects, and a read-only SQL lab.
+Sources: demo book; **Upload files** (csv / tsv / xlsx / **zip** per slot, plus an optional ZIP pack); a dedicated ZIP tab; or URLs. A zip named with `customers*.csv` + `sales*.csv` (optional `behavior*.csv`) can stand in for the three files. Browser cap **200 MB**. Expand **Data plane** for layer log, raw vs clean, rejects, and a read-only SQL lab.
 
 ## CSV contracts
 

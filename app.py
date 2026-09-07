@@ -13,7 +13,7 @@ import streamlit as st
 from src.brain import score_book, simulate_discount
 from src.data import DATA_DIR, TwinBook, write_demo
 from src.history import customer_history, monthly_risk, monthly_sales
-from src.landing import DuckLanding, default_slice_sql, land_paths, land_zip_file
+from src.landing import DuckLanding, absorb_zip, default_slice_sql, land_from_collected, land_paths, land_zip_file
 from src.models import TwinModels, train_twin_models
 from src.pipeline import LAYER_CONTRACT, read_tabular, run_pipeline
 from src.report import twin_pdf
@@ -104,6 +104,16 @@ def _parse_ids(text: str) -> list[str]:
     return [p.strip() for p in text.replace(",", "\n").splitlines() if p.strip()]
 
 
+def _write_tmp(uploaded, suffix: str) -> Path:
+    tmp = Path(tempfile.mkstemp(prefix="keel-up-", suffix=suffix)[1])
+    tmp.write_bytes(uploaded.getvalue())
+    return tmp
+
+
+def _is_zip_upload(uploaded) -> bool:
+    return str(getattr(uploaded, "name", "")).lower().endswith(".zip")
+
+
 def _land_from_ui() -> tuple[DuckLanding, str]:
     if not (DATA_DIR / "customers.csv").exists():
         write_demo()
@@ -122,20 +132,38 @@ def _land_from_ui() -> tuple[DuckLanding, str]:
         )
         return land, "demo book"
     if source == "Upload files":
+        st.caption(
+            "ZIP pack, or customers + sales as csv / tsv / xlsx / zip. "
+            "A ZIP dropped on any slot can hold the whole pack. Browser max ~200 MB."
+        )
+        pack = st.file_uploader(
+            "ZIP pack (optional) — customers*.csv + sales*.csv (+ behavior*.csv)",
+            type=["zip"],
+            key="pack",
+        )
         c1, c2, c3 = st.columns(3)
-        kinds = ["csv", "tsv", "xlsx"]
+        kinds = ["csv", "tsv", "xlsx", "zip"]
         up_c = c1.file_uploader("customers (master)", type=kinds, key="c")
         up_s = c2.file_uploader("sales (purchases)", type=kinds, key="s")
         up_b = c3.file_uploader("behavior (optional)", type=kinds, key="b")
-        if not (up_c and up_s):
-            st.info("Upload customers + sales. ZIP/URL for files bigger than the browser limit.")
+        collected: dict = {}
+        try:
+            if pack is not None:
+                absorb_zip(collected, _write_tmp(pack, ".zip"))
+            for feed, up in (("customers", up_c), ("sales", up_s), ("behavior", up_b)):
+                if up is None:
+                    continue
+                if _is_zip_upload(up):
+                    absorb_zip(collected, _write_tmp(up, ".zip"), slot=feed)
+                else:
+                    collected[feed] = read_tabular(up)
+        except Exception as exc:
+            st.error(str(exc))
             st.stop()
-        land = DuckLanding()
-        land.attach_frame("customers", read_tabular(up_c))
-        land.attach_frame("sales", read_tabular(up_s))
-        if up_b:
-            land.attach_frame("behavior", read_tabular(up_b))
-        return land, "upload files"
+        if "customers" not in collected or "sales" not in collected:
+            st.info("Need customers + sales — two files, or one ZIP that contains both.")
+            st.stop()
+        return land_from_collected(collected), "upload files"
     if source == "Upload ZIP":
         z = st.file_uploader("ZIP with customers*.csv + sales*.csv (+ behavior*.csv)", type=["zip"], key="zip")
         st.caption("Browser ZIP max ~200 MB. For ~2 GB use a Drive/Kaggle/HTTPS link below.")

@@ -152,6 +152,43 @@ def test_zip_rejects_incomplete_archive(tmp_path) -> None:
         extract_zip(zpath)
 
 
+def test_upload_files_accepts_pack_zip_and_csv_overlay(tmp_path) -> None:
+    import zipfile
+
+    from src.landing import absorb_zip, land_from_collected
+
+    customers, sales, behavior = generate_demo(n_customers=24, seed=5)
+    zpath = tmp_path / "pack.zip"
+    with zipfile.ZipFile(zpath, "w") as zf:
+        zf.writestr("customers.csv", customers.to_csv(index=False))
+        zf.writestr("sales.csv", sales.to_csv(index=False))
+    collected: dict = {}
+    absorb_zip(collected, zpath)
+    collected["behavior"] = behavior
+    land = land_from_collected(collected)
+    assert land.rowcount("customers") == len(customers)
+    assert land.rowcount("sales") == len(sales)
+    assert land.rowcount("behavior") == len(behavior)
+
+
+def test_upload_slot_zip_can_carry_the_whole_pack(tmp_path) -> None:
+    import zipfile
+
+    from src.landing import absorb_zip, land_from_collected
+
+    customers, sales, behavior = generate_demo(n_customers=18, seed=9)
+    zpath = tmp_path / "customers_pack.zip"
+    with zipfile.ZipFile(zpath, "w") as zf:
+        zf.writestr("customers.csv", customers.to_csv(index=False))
+        zf.writestr("sales.csv", sales.to_csv(index=False))
+        zf.writestr("behavior.csv", behavior.to_csv(index=False))
+    collected: dict = {}
+    absorb_zip(collected, zpath, slot="customers")
+    land = land_from_collected(collected)
+    assert land.rowcount("sales") == len(sales)
+    assert land.rowcount("behavior") == len(behavior)
+
+
 def test_url_kind_detection() -> None:
     from src.url_ingest import detect_source_kind, extract_gdrive_file_id, looks_like_zip
 
