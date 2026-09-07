@@ -1,53 +1,72 @@
-# Keel
+# Keel — Customer Digital Twin
 
-Sales + churn as **one Customer Twin**. Left is what they buy (LTV, forecast). Right is whether they leave. Center is the decision — retain with offer X, expand, nurture, or let go.
+Sales + churn as **one twin**, same CSV→join→dashboard pattern as OEE Pulse, pointed at the market wall.
 
-This repository is in **planning lock**. Read PDM-001, PDM-002, then [`docs/PDM-003-implementation.md`](docs/PDM-003-implementation.md). The build stack is React + Vite + Tailwind + Recharts + CSV ingest. Application code starts only after you say go.
+Factory team uses OEE / Forge / PDM (machine health). Business team uses Keel (customer health). Same company, no gap.
 
-## What Keel is
-
-A **Customer Digital Twin** platform for any product book of business. Upload sales + behavioral CSVs; every `customer_id` becomes one twin (sales + churn + decision). That is the same Forge / PDM pipeline pointed at the customer, after OEE (factory) and Forge (product).
-
-CSV is the **ingest adapter**, not the product. The product is the twin.
-
-## Standards
-
-Work follows **Forge v2 + PDM** rules, written into PDM-001:
-
-- Spec before code
-- Multi-tenant from day one
-- Workflows over dashboards
-- Explainable risk (drivers, not a mysterious percentage)
-- Never commit `.venv`, `.env`, or model binaries
-
-## Status
-
-| Area | State |
-| --- | --- |
-| Product decision | Accepted (PDM-001, 002, 003) |
-| Web app | Not started (React + Vite, on go) |
-| Seed ledger | Specified, not generated |
-| Deploy | Not started |
-
-## Local run (after the app exists)
-
-```bash
-npm install
-npm run dev
+```text
+customers.csv  (master — who they are)
+sales.csv      (purchase sensors — what they bought)
+behavior.csv   (live health — will they leave)
+        │
+        ▼
+   join on customer_id
+        │
+        ▼
+  Historical charts  →  Twin prediction (next buy + churn % + next best action)
 ```
 
-Upload `sales.csv` + `churn.csv`, or use the shipped demo book. Optional `product` column is affinity; any industry catalog works.
+## Run locally
 
-Optional ML kit (home machine only, later):
+Python 3.11+. Do **not** commit `.venv` — create it on your machine:
 
 ```bash
 python -m venv .venv
-source .venv/bin/activate   # Windows: .venv\Scripts\activate
-pip install -r ml/requirements.txt
+source .venv/bin/activate          # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+python -m src.data                 # writes data/*.csv if missing
+streamlit run app.py --server.port 8512
 ```
 
-`.venv` stays on your machine. Git gets code and lockfiles only.
+Open the URL Streamlit prints. Demo book loads automatically. Or upload your own three CSVs with the columns below.
 
-## License
+## CSV contracts (OEE-style)
 
-Private product source. All rights reserved until published otherwise.
+**customers.csv** — master / history
+
+`customer_id, name, join_date, segment, region, total_orders`
+
+**sales.csv** — transactions / purchase sensors
+
+`customer_id, order_date, amount, product, quantity`
+
+**behavior.csv** — live churn signals
+
+`customer_id, last_login, complaints, support_tickets, days_since_last_purchase, email_open_rate`
+
+Any industry catalog works. `product` is just a SKU name.
+
+## What the models do
+
+- **Sales Twin:** RFM on the joined purchase history + HistGradientBoosting for 90-day LTV and next purchase date. LTV is **risk-adjusted** with the churn probability from the same clock.
+- **Churn Twin:** behavioral decay (silence, tickets, complaints, email) + **calibrated** HGB classifier → churn %, reason (Price / Service / Inactivity), health 0–100.
+- **Brain:** High sales × high risk = Save with Premium Offer; low × high = Let go; high × low = Upsell; else Nurture.
+- **Simulation:** discount slider re-scores both heads live.
+
+## Tests
+
+```bash
+pytest -q
+```
+
+## Deploy on Streamlit Community Cloud
+
+1. Create a GitHub repo from this project (New Project → **Create repo**).
+2. [share.streamlit.io](https://share.streamlit.io) → New app → this repo → `main` → `app.py`.
+3. Deploy. No secrets required. Demo CSVs ship in `data/`.
+
+`.venv` is local-only. Cloud installs from `requirements.txt`.
+
+## Honors story
+
+Machine Twin (OEE / Forge / PDM) → Product Twin → **Customer Twin**. Same join discipline, different user (Sales Head / CRM, not the factory manager).
