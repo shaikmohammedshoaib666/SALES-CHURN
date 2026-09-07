@@ -38,7 +38,7 @@ def test_sales_are_transactions(book) -> None:
 
 def test_models_beat_chance(scored) -> None:
     models, frame = scored
-    assert models.metrics["churn_auc"] >= 0.78
+    assert models.metrics["churn_auc"] >= 0.82
     assert frame["p_churn"].between(0, 1).all()
     assert (frame["ltv_90_adj"] >= 0).all()
 

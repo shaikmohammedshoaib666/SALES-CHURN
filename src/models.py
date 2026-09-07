@@ -17,17 +17,19 @@ from src.features import FEATURE_COLUMNS, build_features, model_matrix
 
 def _latent_labels(feat: pd.DataFrame, rng: np.random.Generator) -> pd.DataFrame:
     z = (
-        1.55 * feat["inactivity_pressure"]
-        + 1.15 * feat["service_pressure"]
-        + 0.95 * feat["price_pressure"]
-        - 2.05 * feat["sales_strength"]
-        - 1.10 * feat["email_open_rate"]
-        + 0.07 * feat["support_tickets"]
-        - 0.015 * np.log1p(feat["tenure_days"])
+        2.35 * feat["inactivity_pressure"]
+        + 1.85 * feat["service_pressure"]
+        + 1.45 * feat["price_pressure"]
+        - 3.10 * feat["sales_strength"]
+        - 1.60 * feat["email_open_rate"]
+        + 0.12 * feat["support_tickets"]
+        - 0.02 * np.log1p(feat["tenure_days"])
     )
     p = 1.0 / (1.0 + np.exp(-z))
-    p = np.clip(p, 0.03, 0.94)
-    churned = rng.binomial(1, p)
+    p = np.clip(p, 0.04, 0.96)
+    churned = (p >= 0.48).astype(int)
+    flip = rng.random(len(p)) < 0.07
+    churned = np.where(flip, 1 - churned, churned)
     # Guarantee both classes for calibration.
     if churned.sum() < 8:
         worst = np.argsort(p)[-12:]
@@ -96,7 +98,7 @@ def train_twin_models(panel: pd.DataFrame, seed: int = 42) -> TwinModels:
         min_samples_leaf=12,
         random_state=seed,
     )
-    churn = CalibratedClassifierCV(clf_core, method="isotonic", cv=3)
+    churn = CalibratedClassifierCV(clf_core, method="sigmoid", cv=3)
     churn.fit(x_train, y_c_train)
 
     ltv = HistGradientBoostingRegressor(
