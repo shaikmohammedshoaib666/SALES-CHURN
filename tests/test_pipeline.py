@@ -9,6 +9,8 @@ from src.history import monthly_sales
 from src.models import train_twin_models
 from src.report import twin_pdf
 from src.twin import twin_from_row
+from src.pipeline import run_pipeline
+from src.warehouse import run_sql
 
 
 @pytest.fixture(scope="module")
@@ -63,3 +65,51 @@ def test_pdf_and_twin_roundtrip(scored) -> None:
     blob = twin_pdf(twin, discount=0.1)
     assert blob.startswith(b"%PDF")
     assert twin.customer_id.startswith("CUST-")
+
+
+def test_messy_sales_and_alias_columns_clean() -> None:
+    customers = pd.DataFrame(
+        {
+            "Customer ID": [" a1 ", "a1", "b2", ""],
+            "Customer Name": ["Acme", "Acme Dup", "Beta", "NoId"],
+            "Join Date": ["2024-01-01", "2024-06-01", "2024-02-02", "2024-01-01"],
+            "Segment": ["Growth", "Growth", "Starter", "Starter"],
+            "Region": ["North", "North", "South", "East"],
+            "Total Orders": [3, 4, 1, 1],
+        }
+    )
+    sales = pd.DataFrame(
+        {
+            "cust_id": ["a1", "a1", "a1", "b2", "b2"],
+            "order_date": ["2024-03-01", "2024-03-01", "2024-08-01", "2024-04-01", "2099-01-01"],
+            "amount": ["₹1,200", "₹1,200", "800", "-50", "100"],
+            "product": ["Seat", "Seat", "Kit", "Kit", "Kit"],
+            "qty": [1, 1, 2, 1, 1],
+        }
+    )
+    pipe = run_pipeline(customers, sales, None)
+    assert pipe.behavior_source == "inferred_from_sales"
+    assert "a1" in set(pipe.customers.clean["customer_id"])
+    assert pipe.customers.clean["customer_id"].nunique() == 2
+    assert (pipe.sales.clean["amount"] >= 0).all()
+    assert len(pipe.sales.rejects) >= 1
+    assert len(pipe.book.panel) >= 1
+
+
+def test_duckdb_sql_lab_on_clean_sales() -> None:
+    customers, sales, behavior = generate_demo(n_customers=40, seed=3)
+    pipe = run_pipeline(customers, sales, behavior)
+    out, engine = run_sql(
+        "SELECT COUNT(*) AS n FROM clean_sales",
+        pipe.tables,
+    )
+    assert engine == "duckdb"
+    assert int(out["n"].iloc[0]) == len(pipe.sales.clean)
+
+
+def test_write_sql_is_blocked() -> None:
+    customers, sales, behavior = generate_demo(n_customers=20, seed=1)
+    pipe = run_pipeline(customers, sales, behavior)
+    with pytest.raises(ValueError, match="read-only"):
+        run_sql("DROP TABLE clean_sales", pipe.tables)
+

@@ -1,57 +1,41 @@
 # Keel — Customer Digital Twin
 
-Sales + churn as **one twin**, same CSV→join→dashboard pattern as OEE Pulse, pointed at the market wall.
-
-Factory team uses OEE / Forge / PDM (machine health). Business team uses Keel (customer health). Same company, no gap.
+Sales + churn as **one twin**. Forge-style **data plane** (DuckDB, raw vs clean, SQL) feeds an unchanged **twin brain**. Same company story as OEE / Forge / PDM — this is the market wall.
 
 ```text
-customers.csv  (master — who they are)
-sales.csv      (purchase sensors — what they bought)
-behavior.csv   (live health — will they leave)
+upload customers + sales [+ optional behavior]
         │
         ▼
-   join on customer_id
+  DuckDB land RAW  →  8-layer CLEAN  →  GOLD join on customer_id
         │
         ▼
-  Historical charts  →  Twin prediction (next buy + churn % + next best action)
+  history charts  →  Sales Twin + Churn Twin + Next Best Action
 ```
+
+Demo CSVs in `data/` load automatically so the dashboard is not empty. Behaviour file is optional: if omitted, inactivity is **derived from last purchase** (logins are not invented).
 
 ## Run locally
 
-Python 3.11+. Do **not** commit `.venv` — create it on your machine:
-
 ```bash
 python -m venv .venv
-source .venv/bin/activate          # Windows: .venv\Scripts\activate
+source .venv/bin/activate
 pip install -r requirements.txt
-python -m src.data                 # writes data/*.csv if missing
 streamlit run app.py --server.port 8512
 ```
 
-Open the URL Streamlit prints. Demo book loads automatically. Or upload your own three CSVs with the columns below.
+Upload up to **200 MB** per file (csv / tsv / xlsx). Expand **Data plane** for layer log, raw vs clean, rejects, and a read-only SQL lab.
 
-## CSV contracts (OEE-style)
+## CSV contracts
 
-**customers.csv** — master / history
+**customers** — `customer_id, name, join_date, segment, region, total_orders`  
+**sales** — `customer_id, order_date, amount, product, quantity`  
+**behavior** (optional) — `customer_id, last_login, complaints, support_tickets, days_since_last_purchase, email_open_rate`
 
-`customer_id, name, join_date, segment, region, total_orders`
+Aliases like `cust_id`, `₹1,200`, `qty` are cleaned in the pipeline.
 
-**sales.csv** — transactions / purchase sensors
+## Twin brain (unchanged)
 
-`customer_id, order_date, amount, product, quantity`
-
-**behavior.csv** — live churn signals
-
-`customer_id, last_login, complaints, support_tickets, days_since_last_purchase, email_open_rate`
-
-Any industry catalog works. `product` is just a SKU name.
-
-## What the models do
-
-- **Sales Twin:** RFM on the joined purchase history + HistGradientBoosting for 90-day LTV and next purchase date. LTV is **risk-adjusted** with the churn probability from the same clock.
-- **Churn Twin:** behavioral decay (silence, tickets, complaints, email) + **calibrated** HGB classifier → churn %, reason (Price / Service / Inactivity), health 0–100.
-- **Brain:** High sales × high risk = Save with Premium Offer; low × high = Let go; high × low = Upsell; else Nurture.
-- **Simulation:** discount slider re-scores both heads live.
+RFM + calibrated HGB for 90d LTV / next purchase / churn %. Decision: Save / Let go / Upsell / Nurture. Discount slider re-scores both heads.
 
 ## Tests
 
@@ -59,14 +43,12 @@ Any industry catalog works. `product` is just a SKU name.
 pytest -q
 ```
 
-## Deploy on Streamlit Community Cloud
+## Streamlit Cloud
 
-1. Create a GitHub repo from this project (New Project → **Create repo**).
-2. [share.streamlit.io](https://share.streamlit.io) → New app → this repo → `main` → `app.py`.
-3. Deploy. No secrets required. Demo CSVs ship in `data/`.
-
-`.venv` is local-only. Cloud installs from `requirements.txt`.
+Repo: [shaikmohammedshoaib666/SALES-CHURN](https://github.com/shaikmohammedshoaib666/SALES-CHURN)  
+Deploy: [share.streamlit.io deploy](https://share.streamlit.io/deploy?repository=shaikmohammedshoaib666/SALES-CHURN&branch=main&mainModule=app.py)  
+Main file `app.py`, branch `main`. No secrets.
 
 ## Honors story
 
-Machine Twin (OEE / Forge / PDM) → Product Twin → **Customer Twin**. Same join discipline, different user (Sales Head / CRM, not the factory manager).
+Machine Twin (OEE / Forge / PDM) → **Customer Twin**. Same ingest contract, different user (Sales / CRM).

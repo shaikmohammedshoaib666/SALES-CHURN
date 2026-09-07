@@ -9,19 +9,13 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from src.brain import score_book, simulate_discount
-from src.data import (
-    DATA_DIR,
-    TwinBook,
-    join_book,
-    load_behavior,
-    load_customers,
-    load_sales,
-    write_demo,
-)
+from src.data import DATA_DIR, TwinBook, write_demo
 from src.history import customer_history, monthly_risk, monthly_sales
 from src.models import TwinModels, train_twin_models
+from src.pipeline import LAYER_CONTRACT, read_tabular, run_pipeline
 from src.report import twin_pdf
 from src.twin import CustomerTwin, twin_from_row
+from src.warehouse import run_sql
 
 st.set_page_config(
     page_title="Keel · Customer Twin",
@@ -102,43 +96,87 @@ def _dark(fig: go.Figure) -> go.Figure:
     return fig
 
 
-def _load_book() -> TwinBook:
+def _ingest() -> TwinBook:
     st.markdown(
         '<div class="hero"><h1>Customer Digital Twin</h1>'
-        "<p>Same OEE Pulse pattern — three CSVs, one join, one twin. "
-        "Factory wall is Forge / PDM / OEE. This is the market wall: who buys the units, who leaves.</p></div>",
+        "<p>Forge-style data plane (DuckDB · raw vs clean · SQL) feeding an unchanged twin brain. "
+        "Factory wall is OEE / Forge / PDM. This is the market wall.</p></div>",
         unsafe_allow_html=True,
     )
     c1, c2, c3 = st.columns(3)
-    up_c = c1.file_uploader("1 · customers.csv (master)", type=["csv"], key="c")
-    up_s = c2.file_uploader("2 · sales.csv (purchase sensors)", type=["csv"], key="s")
-    up_b = c3.file_uploader("3 · behavior.csv (live health)", type=["csv"], key="b")
+    kinds = ["csv", "tsv", "xlsx"]
+    up_c = c1.file_uploader("1 · customers (master)", type=kinds, key="c")
+    up_s = c2.file_uploader("2 · sales (purchase sensors)", type=kinds, key="s")
+    up_b = c3.file_uploader("3 · behavior (optional live health)", type=kinds, key="b")
 
     if not (DATA_DIR / "customers.csv").exists():
         write_demo()
 
     try:
-        if up_c and up_s and up_b:
-            customers = load_customers(file=up_c)
-            sales = load_sales(file=up_s)
-            behavior = load_behavior(file=up_b)
-            source = "uploaded"
+        if up_c and up_s:
+            customers = read_tabular(up_c)
+            sales = read_tabular(up_s)
+            behavior = read_tabular(up_b) if up_b else None
+            source = "upload"
+        elif up_c or up_s or up_b:
+            st.error("Upload customers + sales. Behaviour is optional (inferred from last purchase).")
+            st.stop()
         else:
-            customers = load_customers(DATA_DIR / "customers.csv")
-            sales = load_sales(DATA_DIR / "sales.csv")
-            behavior = load_behavior(DATA_DIR / "behavior.csv")
+            customers = pd.read_csv(DATA_DIR / "customers.csv")
+            sales = pd.read_csv(DATA_DIR / "sales.csv")
+            behavior = pd.read_csv(DATA_DIR / "behavior.csv")
             source = "demo book"
-        book = join_book(customers, sales, behavior)
-    except ValueError as exc:
+        pipe = run_pipeline(customers, sales, behavior)
+    except (ValueError, OSError) as exc:
         st.error(str(exc))
         st.stop()
 
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Master customers", f"{len(book.customers):,}")
-    m2.metric("Purchase events", f"{len(book.sales):,}")
-    m3.metric("Twins after join", f"{len(book.panel):,}")
-    m4.metric("Dropped (no overlap)", f"{book.dropped_ids:,}")
-    st.caption(f"Join key `customer_id` · source: {source} · inner join like OEE Pulse")
+    book = pipe.book
+    st.session_state["pipeline"] = pipe
+    m1, m2, m3, m4, m5 = st.columns(5)
+    m1.metric("Raw master rows", f"{len(pipe.customers.raw):,}")
+    m2.metric("Clean sales events", f"{len(pipe.sales.clean):,}")
+    m3.metric("Twins (gold join)", f"{len(book.panel):,}")
+    n_rej = len(pipe.customers.rejects) + len(pipe.sales.rejects) + len(pipe.behavior.rejects)
+    m4.metric("Reject rows", f"{n_rej:,}")
+    m5.metric("Behaviour", "inferred" if pipe.behavior_source == "inferred_from_sales" else "uploaded")
+    st.caption(f"Source: {source} · join `customer_id` · unmatched {book.dropped_ids:,} · {pipe.gold_note}")
+
+    with st.expander("Data plane · 8 layers · raw vs clean · DuckDB SQL (Forge v2 slice)", expanded=False):
+        st.write("Contract: " + " → ".join(LAYER_CONTRACT))
+        st.dataframe(pipe.layer_rows, use_container_width=True, hide_index=True)
+        t1, t2, t3, t4 = st.tabs(["Raw vs clean", "Rejects", "SQL lab", "Gold panel"])
+        with t1:
+            feed = st.selectbox("Feed", ["customers", "sales", "behavior"])
+            left, right = st.columns(2)
+            raw_map = {"customers": pipe.customers.raw, "sales": pipe.sales.raw, "behavior": pipe.behavior.raw}
+            clean_map = {"customers": pipe.customers.clean, "sales": pipe.sales.clean, "behavior": pipe.behavior.clean}
+            left.caption("RAW (untouched)")
+            left.dataframe(raw_map[feed].head(40), use_container_width=True)
+            right.caption("CLEAN (rules applied)")
+            right.dataframe(clean_map[feed].head(40), use_container_width=True)
+        with t2:
+            st.caption("Customers rejects")
+            st.dataframe(pipe.customers.rejects.head(30), use_container_width=True)
+            st.caption("Sales rejects")
+            st.dataframe(pipe.sales.rejects.head(30), use_container_width=True)
+            st.caption("Behaviour rejects")
+            st.dataframe(pipe.behavior.rejects.head(30), use_container_width=True)
+        with t3:
+            default_sql = (
+                "SELECT customer_id, COUNT(*) AS orders, SUM(amount) AS revenue "
+                "FROM clean_sales GROUP BY 1 ORDER BY revenue DESC LIMIT 20"
+            )
+            sql = st.text_area("Read-only SQL (DuckDB)", value=default_sql, height=90)
+            if st.button("Run SQL"):
+                try:
+                    result, engine = run_sql(sql, pipe.tables)
+                    st.caption(f"engine: {engine}")
+                    st.dataframe(result, use_container_width=True)
+                except Exception as exc:  # show analyst-facing SQL errors
+                    st.error(str(exc))
+        with t4:
+            st.dataframe(book.panel.head(40), use_container_width=True)
     return book
 
 
@@ -248,7 +286,7 @@ def _twin_view(twin: CustomerTwin, hist: pd.DataFrame) -> None:
 
 def main() -> None:
     st.markdown(CSS, unsafe_allow_html=True)
-    book = _load_book()
+    book = _ingest()
     models = _models(book)
 
     discount_pct = st.slider("Twin simulation · commercial discount", min_value=0, max_value=20, value=0, step=1, format="%d%%")
