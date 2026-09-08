@@ -52,6 +52,14 @@ Does **not** retrain. Time presets (last month / 3 / 6 / 12 months / half year /
 
 SQL slice at the top still decides who entered the brain. Extended only changes what you look at.
 
+## Write-back lite (does not change the twin)
+
+Under the twin: **action queue CSV** (Save + Upsell by default). Load it into a sheet or Salesforce Data Loader. This app does **not** log into a CRM. Next period, join on `customer_id` to see who still bought.
+
+**Demo AUC:** the 0.89-style score uses **constructed** churn labels on the demo book so the model can be graded. It is not a live CRM “this account left.”
+
+**URLs:** reuse last URLs **this browser session**. Streamlit Cloud has no weekly CRM cron.
+
 ## Tests
 
 ```bash

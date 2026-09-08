@@ -31,11 +31,12 @@ from src.extended import (
     twins_by_region,
     unique_values,
 )
-from src.explain import importance_percent_table
+from src.explain import DEMO_CHURN_DISCLAIMER, importance_percent_table
 from src.history import customer_history, monthly_risk, monthly_sales
 from src.landing import DuckLanding, absorb_zip, default_slice_sql, land_from_collected, land_paths, land_zip_file
 from src.models import TwinModels, train_twin_models
 from src.pipeline import LAYER_CONTRACT, read_tabular, run_pipeline
+from src.queue import PlayCut, build_action_queue, queue_csv_bytes, queue_filename
 from src.report import twin_pdf
 from src.twin import CustomerTwin, twin_from_row
 from src.url_ingest import resolve_source
@@ -198,11 +199,20 @@ def _land_from_ui() -> tuple[DuckLanding, str]:
         return land_zip_file(tmp), "zip"
     st.caption(
         "DuckDB reads the file; SQL slice runs *before* pandas/clean/twin. "
-        "Kaggle dataset pages need KAGGLE_USERNAME + KAGGLE_KEY secrets, or paste a direct file URL."
+        "Kaggle dataset pages need KAGGLE_USERNAME + KAGGLE_KEY secrets, or paste a direct file URL. "
+        "This is not a weekly CRM cron — Streamlit Cloud will not pull Salesforce by itself. "
+        "Reuse last URLs this session, or keep the links and click URL mode again."
     )
-    u_c = st.text_input("Customers URL")
-    u_s = st.text_input("Sales URL (or a single ZIP URL in this box and leave others empty)")
-    u_b = st.text_input("Behavior URL (optional)")
+    last = st.session_state.get("keel_last_urls")
+    if isinstance(last, dict) and last.get("s"):
+        if st.button("Reuse last URLs this session"):
+            st.session_state["url_customers"] = str(last.get("c", ""))
+            st.session_state["url_sales"] = str(last.get("s", ""))
+            st.session_state["url_behavior"] = str(last.get("b", ""))
+            st.rerun()
+    u_c = st.text_input("Customers URL", key="url_customers")
+    u_s = st.text_input("Sales URL (or a single ZIP URL in this box and leave others empty)", key="url_sales")
+    u_b = st.text_input("Behavior URL (optional)", key="url_behavior")
     if not u_s.strip():
         st.info("Paste at least a sales CSV/Parquet/ZIP URL.")
         st.stop()
@@ -210,6 +220,7 @@ def _land_from_ui() -> tuple[DuckLanding, str]:
         path, _meta = resolve_source(u_s.strip())
         peek = Path(path)
         if str(path).lower().endswith(".zip") or zipfile_is_zip(peek):
+            st.session_state["keel_last_urls"] = {"c": u_c, "s": u_s, "b": u_b}
             return land_zip_file(peek), "url-zip"
         raise ValueError("Customers URL is required unless the sales URL is a ZIP that contains both files.")
     paths: dict[str, str] = {}
@@ -218,6 +229,7 @@ def _land_from_ui() -> tuple[DuckLanding, str]:
     paths["sales"], _ = resolve_source(u_s.strip())
     if u_b.strip():
         paths["behavior"], _ = resolve_source(u_b.strip())
+    st.session_state["keel_last_urls"] = {"c": u_c, "s": u_s, "b": u_b}
     return land_paths(paths), "url"
 
 
@@ -650,6 +662,52 @@ def _extended_board(book: TwinBook, scored: pd.DataFrame, pick_id: str) -> None:
         )
 
 
+def _action_queue_layer(scored: pd.DataFrame, *, discount: float) -> None:
+    st.markdown("#### Write-back lite · action queue")
+    st.caption(
+        "Save $X becomes rows you can load into a Google Sheet or Salesforce Data Loader. "
+        "This app does not log into a CRM. Next month, join this file on customer_id to see who still bought."
+    )
+    cut_label = st.radio(
+        "Which plays to export",
+        ["Actionable (Save + Upsell)", "Save only", "All four plays"],
+        horizontal=True,
+        key="queue_cut",
+    )
+    cut_map: dict[str, PlayCut] = {
+        "Actionable (Save + Upsell)": "actionable",
+        "Save only": "save",
+        "All four plays": "all",
+    }
+    cut = cut_map[cut_label]
+    queue = build_action_queue(scored, as_of=AS_OF, cut=cut, discount=discount)
+    q1, q2, q3 = st.columns(3)
+    q1.metric("Rows in queue", f"{len(queue):,}")
+    q2.metric("Expected value in queue", f"${float(queue['expected_value'].sum()) if not queue.empty else 0:,.0f}")
+    n_save = int((queue["action_code"] == "SAVE_PREMIUM").sum()) if not queue.empty else 0
+    q3.metric("Save rows", f"{n_save:,}")
+    preview_cols = [
+        "customer_id",
+        "name",
+        "action_title",
+        "expected_value",
+        "ltv_90_adj",
+        "p_churn",
+        "offer",
+        "writeback_status",
+    ]
+    show = [c for c in preview_cols if c in queue.columns]
+    st.dataframe(queue[show].head(40) if not queue.empty else queue, use_container_width=True, hide_index=True)
+    st.download_button(
+        "Download action queue (CSV)",
+        data=queue_csv_bytes(queue) if not queue.empty else b"",
+        file_name=queue_filename(AS_OF, cut),
+        mime="text/csv",
+        disabled=queue.empty,
+        key="queue_csv",
+    )
+
+
 def main() -> None:
     st.markdown(CSS, unsafe_allow_html=True)
     book = _ingest()
@@ -665,6 +723,7 @@ def main() -> None:
     k3.metric("Save plays", int((scored["action_code"] == "SAVE_PREMIUM").sum()))
     k4.metric("Upsell plays", int((scored["action_code"] == "UPSELL_LOYALTY").sum()))
     k5.metric("Churn AUC", f"{models.metrics['churn_auc']:.2f}")
+    st.caption(DEMO_CHURN_DISCLAIMER)
 
     st.markdown("#### Historical layer")
     _history_charts(book)
@@ -695,9 +754,12 @@ def main() -> None:
         mime="application/pdf",
     )
 
+    _action_queue_layer(scored, discount=discount)
+
     _extended_board(book, scored, pick_id)
 
     with st.expander("Model card · faculty / engineering"):
+        st.warning(DEMO_CHURN_DISCLAIMER)
         st.write(models.metrics)
         if models.importances is not None:
             imp = importance_percent_table(models.importances)

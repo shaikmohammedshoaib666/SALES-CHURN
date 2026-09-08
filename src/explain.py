@@ -8,6 +8,12 @@ import pandas as pd
 
 from src.features import FEATURE_COLUMNS
 
+DEMO_CHURN_DISCLAIMER: Final[str] = (
+    "Churn AUC on the demo book is a lab score. The yes/no churn labels are constructed "
+    "inside this app so the model can be graded. They are not a CRM export of 'this account left'. "
+    "On your own customers + sales file the AUC will change. Treat 0.89 as 'the twin can rank the demo book', not as a promise on live tenants."
+)
+
 FEATURE_LABELS: Final[Mapping[str, str]] = {
     "recency_days": "Recency days",
     "frequency": "Frequency",
