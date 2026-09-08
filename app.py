@@ -11,7 +11,24 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from src.brain import score_book, simulate_discount
-from src.data import DATA_DIR, TwinBook, write_demo
+from src.data import AS_OF, DATA_DIR, TwinBook, write_demo
+from src.extended import (
+    GRAINS,
+    PRESETS,
+    attach_customer_attrs,
+    at_risk_ltv_by_region,
+    filter_sales,
+    filter_twins,
+    play_mix,
+    resolve_window,
+    sales_by_product,
+    sales_by_region,
+    sales_over_time,
+    shape_metrics,
+    top_customers,
+    twins_by_region,
+    unique_values,
+)
 from src.history import customer_history, monthly_risk, monthly_sales
 from src.landing import DuckLanding, absorb_zip, default_slice_sql, land_from_collected, land_paths, land_zip_file
 from src.models import TwinModels, train_twin_models
@@ -209,8 +226,8 @@ def zipfile_is_zip(path: Path) -> bool:
 def _ingest() -> TwinBook:
     st.markdown(
         '<div class="hero"><h1>Customer Digital Twin</h1>'
-        "<p>Land in DuckDB (files / ZIP / Drive-Kaggle URL) → SQL slice by time, region, IDs "
-        "→ clean layers → unchanged twin brain. 2 GB stays in the warehouse; only the slice is scored.</p></div>",
+        "<p>Land in DuckDB → SQL slice → twin brain. Extended board under the twin: "
+        "region, 3/6/12 months, sales and customer charts — filters do not retrain.</p></div>",
         unsafe_allow_html=True,
     )
     try:
@@ -437,6 +454,187 @@ def _twin_view(twin: CustomerTwin, hist: pd.DataFrame) -> None:
         )
 
 
+def _empty_fig(title: str) -> go.Figure:
+    fig = go.Figure()
+    fig.add_annotation(
+        text="No rows in this cut",
+        xref="paper",
+        yref="paper",
+        x=0.5,
+        y=0.5,
+        showarrow=False,
+        font=dict(color="#94A3B8"),
+    )
+    fig.update_xaxes(visible=False)
+    fig.update_yaxes(visible=False)
+    return _dark(fig).update_layout(title=title, height=300)
+
+
+def _extended_board(book: TwinBook, scored: pd.DataFrame, pick_id: str) -> None:
+    st.markdown("#### Extended · commercial board")
+    st.caption(
+        "Filters change the charts only. The twin above is not retrained. "
+        "SQL slice at the top still decides who entered the brain."
+    )
+
+    tagged = attach_customer_attrs(book.sales, book.customers)
+    f1, f2, f3 = st.columns([1.3, 0.8, 1.2])
+    preset = f1.selectbox("Time window", list(PRESETS), index=3)
+    grain = f2.selectbox("Period grain", list(GRAINS), index=2)
+    lock_twin = f3.checkbox("Charts for open twin only", value=False)
+    custom_from = custom_to = ""
+    if preset == "Custom":
+        d1, d2 = st.columns(2)
+        custom_from = d1.text_input("From", "2025-09-01")
+        custom_to = d2.text_input("To", "2026-09-07")
+
+    window = resolve_window(preset, as_of=AS_OF, custom_from=custom_from, custom_to=custom_to)
+    regions_opt = unique_values(tagged, "region") or unique_values(book.customers, "region")
+    segments_opt = unique_values(tagged, "segment") or unique_values(book.customers, "segment")
+    products_opt = unique_values(book.sales, "product")
+
+    c1, c2, c3 = st.columns(3)
+    regions = c1.multiselect("Region", regions_opt, default=[])
+    segments = c2.multiselect("Segment", segments_opt, default=[])
+    products = c3.multiselect("Product", products_opt, default=[])
+
+    extra_ids = st.text_input("Customer IDs (optional, comma or newline)", key="ext_ids")
+    ids = _parse_ids(extra_ids)
+    if lock_twin:
+        ids = [pick_id]
+
+    sales_cut = filter_sales(
+        book.sales,
+        book.customers,
+        window,
+        regions=regions,
+        segments=segments,
+        products=products,
+        customer_ids=ids or None,
+    )
+    time_bound = window.start is not None or window.end is not None
+    sales_ids = None
+    if time_bound:
+        sales_ids = sales_cut["customer_id"] if not sales_cut.empty else []
+    twins_cut = filter_twins(
+        scored,
+        regions=regions,
+        segments=segments,
+        customer_ids=ids or None,
+        sales_ids=sales_ids,
+    )
+
+    shape = shape_metrics(sales_cut, book.customers, twins_cut)
+    m1, m2, m3, m4, m5, m6 = st.columns(6)
+    m1.metric("Sales rows × cols", f"{shape['sales_rows']:,} × {shape['sales_cols']}")
+    m2.metric("Revenue in cut", f"${shape['revenue']:,.0f}")
+    m3.metric("Buyers in cut", f"{shape['distinct_buyers']:,}")
+    m4.metric("Twins in cut", f"{shape['twin_rows']:,}")
+    m5.metric("Customer file", f"{shape['customer_rows']:,} × {shape['customer_cols']}")
+    m6.metric("Sales dates", f"{shape['date_min']} → {shape['date_max']}")
+    st.caption(f"Window: {window.label}" + (f" · {window.start.date()} → {window.end.date()}" if window.start is not None and window.end is not None else ""))
+
+    sales_tab, customers_tab = st.tabs(["Sales charts", "Customer / twin charts"])
+    with sales_tab:
+        left, right = st.columns(2)
+        time_df = sales_over_time(sales_cut, grain)
+        if time_df.empty:
+            left.plotly_chart(_empty_fig(f"Sales over time · {grain}"), use_container_width=True)
+        else:
+            fig = go.Figure()
+            fig.add_bar(x=time_df["period"], y=time_df["revenue"], name="Revenue", marker_color="#2DD4BF")
+            fig.add_scatter(
+                x=time_df["period"],
+                y=time_df["orders"],
+                name="Orders",
+                yaxis="y2",
+                line=dict(color="#38BDF8", width=2.4),
+            )
+            fig.update_layout(yaxis2=dict(overlaying="y", side="right", showgrid=False, title="Orders"))
+            left.plotly_chart(_dark(fig).update_layout(title=f"Sales over time · {grain}", height=300), use_container_width=True)
+
+        region_df = sales_by_region(sales_cut)
+        if region_df.empty:
+            right.plotly_chart(_empty_fig("Sales per region"), use_container_width=True)
+        else:
+            fig = go.Figure(go.Bar(x=region_df["region"], y=region_df["revenue"], marker_color="#2DD4BF", name="Revenue"))
+            right.plotly_chart(_dark(fig).update_layout(title="Sales per region", height=300), use_container_width=True)
+
+        p1, p2 = st.columns(2)
+        prod_df = sales_by_product(sales_cut)
+        if prod_df.empty:
+            p1.plotly_chart(_empty_fig("Sales by product"), use_container_width=True)
+        else:
+            fig = go.Figure(go.Bar(x=prod_df["revenue"], y=prod_df["product"], orientation="h", marker_color="#38BDF8"))
+            p1.plotly_chart(_dark(fig).update_layout(title="Sales by product", height=300), use_container_width=True)
+
+        top_df = top_customers(sales_cut)
+        if top_df.empty:
+            p2.plotly_chart(_empty_fig("Top customers in cut"), use_container_width=True)
+        else:
+            labels = top_df["name"].astype(str) + " · " + top_df["customer_id"].astype(str)
+            fig = go.Figure(go.Bar(x=top_df["revenue"], y=labels, orientation="h", marker_color="#FBBF24"))
+            p2.plotly_chart(_dark(fig).update_layout(title="Top customers in cut", height=300), use_container_width=True)
+
+        twin_sales = sales_cut[sales_cut["customer_id"].astype(str) == str(pick_id)] if not sales_cut.empty else sales_cut
+        one = sales_over_time(twin_sales, grain)
+        if one.empty:
+            st.plotly_chart(_empty_fig(f"Open twin {pick_id} · buying in window"), use_container_width=True)
+        else:
+            fig = go.Figure(go.Bar(x=one["period"], y=one["revenue"], marker_color="#2DD4BF", name="Revenue"))
+            st.plotly_chart(
+                _dark(fig).update_layout(title=f"Open twin {pick_id} · buying in this window", height=280),
+                use_container_width=True,
+            )
+        st.download_button(
+            "Download sales cut (CSV)",
+            data=sales_cut.to_csv(index=False).encode("utf-8") if not sales_cut.empty else b"",
+            file_name="extended_sales_cut.csv",
+            mime="text/csv",
+            disabled=sales_cut.empty,
+        )
+
+    with customers_tab:
+        left, right = st.columns(2)
+        by_reg = twins_by_region(twins_cut)
+        if by_reg.empty:
+            left.plotly_chart(_empty_fig("Twins per region"), use_container_width=True)
+        else:
+            fig = go.Figure()
+            fig.add_bar(x=by_reg["region"], y=by_reg["twins"], name="Twins", marker_color="#38BDF8")
+            fig.add_bar(x=by_reg["region"], y=by_reg["at_risk"], name="At risk", marker_color="#FB7185")
+            fig.update_layout(barmode="group", title="Twins vs at-risk per region", height=300)
+            left.plotly_chart(_dark(fig), use_container_width=True)
+
+        risk_df = at_risk_ltv_by_region(twins_cut)
+        if risk_df.empty:
+            right.plotly_chart(_empty_fig("At-risk LTV per region"), use_container_width=True)
+        else:
+            fig = go.Figure(go.Bar(x=risk_df["region"], y=risk_df["at_risk_ltv"], marker_color="#FB7185"))
+            right.plotly_chart(_dark(fig).update_layout(title="At-risk LTV per region", height=300), use_container_width=True)
+
+        mix = play_mix(twins_cut)
+        if mix.empty:
+            st.plotly_chart(_empty_fig("Play mix in cut"), use_container_width=True)
+        else:
+            colors = {"Save": "#FBBF24", "Upsell": "#2DD4BF", "Let go": "#64748B", "Nurture": "#38BDF8"}
+            fig = go.Figure(
+                go.Bar(
+                    x=mix["play"],
+                    y=mix["twins"],
+                    marker_color=[colors.get(p, "#94A3B8") for p in mix["play"]],
+                )
+            )
+            st.plotly_chart(_dark(fig).update_layout(title="Play mix in this cut (Save / Let go / Upsell / Nurture)", height=300), use_container_width=True)
+        st.download_button(
+            "Download twins cut (CSV)",
+            data=twins_cut.to_csv(index=False).encode("utf-8") if not twins_cut.empty else b"",
+            file_name="extended_twins_cut.csv",
+            mime="text/csv",
+            disabled=twins_cut.empty,
+        )
+
+
 def main() -> None:
     st.markdown(CSS, unsafe_allow_html=True)
     book = _ingest()
@@ -478,6 +676,8 @@ def main() -> None:
         file_name=f"twin_{twin.customer_id}.pdf",
         mime="application/pdf",
     )
+
+    _extended_board(book, scored, pick_id)
 
     with st.expander("Model card · faculty / engineering"):
         st.write(models.metrics)

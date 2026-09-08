@@ -10,6 +10,9 @@ Demo book | upload files | ZIP | Drive / Kaggle / HTTPS URL
         │
         ▼
   history charts  →  Sales Twin + Churn Twin + Next Best Action
+        │
+        ▼
+  Extended board (presets + region/segment/product filters, 7 charts, no retrain)
 ```
 
 Demo CSVs in `data/` load automatically so the dashboard is not empty. Behaviour file is optional: if omitted, inactivity is **derived from last purchase** (logins are not invented).
@@ -38,6 +41,16 @@ Aliases like `cust_id`, `₹1,200`, `qty` are cleaned in the pipeline.
 ## Twin brain (unchanged)
 
 RFM + calibrated HGB for 90d LTV / next purchase / churn %. Decision: Save / Let go / Upsell / Nurture. Discount slider re-scores both heads.
+
+## Extended board (below the twin)
+
+Does **not** retrain. Time presets (last month / 3 / 6 / 12 months / half year / YTD / custom), period grain (day / week / month), region, segment, product, optional IDs.
+
+- **Sales charts:** over time, per region, by product, top customers, open twin in the window  
+- **Customer charts:** twins vs at-risk per region, at-risk LTV per region, play mix  
+- Shape row: sales rows×cols, revenue, buyers, twins, customer file shape, date span  
+
+SQL slice at the top still decides who entered the brain. Extended only changes what you look at.
 
 ## Tests
 
