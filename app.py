@@ -6,6 +6,8 @@ import hashlib
 import tempfile
 from pathlib import Path
 
+from html import escape
+
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
@@ -29,6 +31,7 @@ from src.extended import (
     twins_by_region,
     unique_values,
 )
+from src.explain import importance_percent_table
 from src.history import customer_history, monthly_risk, monthly_sales
 from src.landing import DuckLanding, absorb_zip, default_slice_sql, land_from_collected, land_paths, land_zip_file
 from src.models import TwinModels, train_twin_models
@@ -78,6 +81,10 @@ header { visibility: hidden; }
 }
 .ring-val { font-size: 2rem; font-weight: 700; color: #F8FAFC; }
 .ring-lbl { font-size: 0.75rem; color: #94A3B8; letter-spacing: 0.12em; text-transform: uppercase; }
+.pulse-ring { cursor: help; }
+.health-why { color: #94A3B8; font-size: 0.78rem; line-height: 1.35; margin: 6px 8px 10px 8px; }
+.ev-line { color: #F8FAFC; font-size: 0.88rem; margin: 8px 0 0 0; }
+.ev-line b { color: #FBBF24; }
 .nba {
   background: linear-gradient(180deg, rgba(251,191,36,0.12), rgba(15,23,42,0.9));
   border: 1px solid rgba(251,191,36,0.35);
@@ -432,14 +439,22 @@ def _twin_view(twin: CustomerTwin, hist: pd.DataFrame) -> None:
 
     with center:
         st.markdown("##### Twin core")
+        why = escape(twin.health_why(), quote=True)
         st.markdown(
-            f'<div class="pulse-ring"><div class="ring-val">{twin.health:.0f}</div>'
+            f'<div class="pulse-ring" title="{why}"><div class="ring-val">{twin.health:.0f}</div>'
             f'<div class="ring-lbl">health</div></div>',
             unsafe_allow_html=True,
         )
+        st.caption(
+            f"Why {twin.health:.0f}: recency {twin.recency_days}d · tickets {twin.support_tickets:.0f} · "
+            f"complaints {twin.complaints:.0f} · email open {twin.email_open_rate:.0%} · "
+            f"churn {twin.p_churn:.0%}. Hover the ring for the formula (OEE-style)."
+        )
         st.markdown(
-            f'<div class="nba"><h3>{twin.action_title}</h3>'
-            f"<p>{twin.action_play}</p><p><b>Offer:</b> {twin.offer}</p></div>",
+            f'<div class="nba"><h3>{escape(twin.action_title)}</h3>'
+            f"<p>{escape(twin.action_play)}</p>"
+            f'<p class="ev-line"><b>Expected value of action:</b> {escape(twin.ev_line())}</p>'
+            f"<p><b>Offer:</b> {escape(twin.offer)}</p></div>",
             unsafe_allow_html=True,
         )
         st.caption(f"{twin.customer_id} · {twin.name} · {twin.segment} · {twin.region} · {twin.rfm_segment}")
@@ -656,7 +671,10 @@ def main() -> None:
 
     st.markdown("#### Twin prediction layer")
     id_labels = {
-        str(r.customer_id): f"{r.customer_id}  ·  {r.name}  ·  {r.action_title}  ·  {r.p_churn:.0%} churn"
+        str(r.customer_id): (
+            f"{r.customer_id}  ·  {r.name}  ·  {r.action_title}  ·  "
+            f"${float(r.expected_value):,.0f} EV  ·  {r.p_churn:.0%} churn"
+        )
         for r in scored.itertuples()
     }
     pick_id = st.selectbox(
@@ -682,23 +700,31 @@ def main() -> None:
     with st.expander("Model card · faculty / engineering"):
         st.write(models.metrics)
         if models.importances is not None:
-            st.dataframe(models.importances.head(8), use_container_width=True, hide_index=True)
-        st.dataframe(
-            scored[
-                [
-                    "customer_id",
-                    "name",
-                    "ltv_90_adj",
-                    "p_churn",
-                    "health",
-                    "action_title",
-                    "churn_reason",
-                    "next_purchase",
-                ]
-            ].head(25),
-            use_container_width=True,
-            hide_index=True,
-        )
+            imp = importance_percent_table(models.importances)
+            st.caption(
+                "Feature importance as % of how much each sensor moved churn AUC "
+                "(0.0443 → 4.43%). Not a 100% pie — permutation importance, not a budget split."
+            )
+            st.dataframe(
+                imp[["feature", "importance_label"]].rename(
+                    columns={"feature": "sensor", "importance_label": "importance"}
+                ).head(12),
+                use_container_width=True,
+                hide_index=True,
+            )
+        show_cols = [
+            "customer_id",
+            "name",
+            "ltv_90_adj",
+            "p_churn",
+            "expected_value",
+            "health",
+            "action_title",
+            "churn_reason",
+            "next_purchase",
+        ]
+        present = [c for c in show_cols if c in scored.columns]
+        st.dataframe(scored[present].head(25), use_container_width=True, hide_index=True)
 
 
 if __name__ == "__main__":

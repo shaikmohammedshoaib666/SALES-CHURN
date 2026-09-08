@@ -65,6 +65,12 @@ def test_pdf_and_twin_roundtrip(scored) -> None:
     blob = twin_pdf(twin, discount=0.1)
     assert blob.startswith(b"%PDF")
     assert twin.customer_id.startswith("CUST-")
+    assert abs(twin.expected_value() - twin.ltv_90_adj * twin.p_churn) < 1e-6
+    assert "at risk" in twin.ev_line()
+    assert "Health" in twin.health_why()
+    assert "expected_value" in frame.columns
+    top = frame.iloc[0]
+    assert float(top["expected_value"]) == pytest.approx(float(top["priority"]))
 
 
 def test_messy_sales_and_alias_columns_clean() -> None:

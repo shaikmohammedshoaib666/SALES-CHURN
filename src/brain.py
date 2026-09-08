@@ -80,7 +80,8 @@ def attach_brain(scored: pd.DataFrame) -> pd.DataFrame:
         offer_for(str(r), str(a), str(p))
         for r, a, p in zip(df["churn_reason"], df["action_code"], df["affinity_product"])
     ]
-    df["priority"] = df["ltv_90_adj"] * df["p_churn"]
+    df["expected_value"] = df["ltv_90_adj"].astype(float) * df["p_churn"].astype(float)
+    df["priority"] = df["expected_value"]
     df["next_purchase"] = [(AS_OF + timedelta(days=int(d))).date().isoformat() for d in df["next_days"]]
     df["band"] = np.select(
         [df["p_churn"] >= 0.70, df["p_churn"] >= 0.45, df["p_churn"] >= 0.28],
