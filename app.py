@@ -515,7 +515,7 @@ def _extended_board(book: TwinBook, scored: pd.DataFrame, pick_id: str) -> None:
     time_bound = window.start is not None or window.end is not None
     sales_ids = None
     if time_bound:
-        sales_ids = sales_cut["customer_id"] if not sales_cut.empty else []
+        sales_ids = sales_cut["customer_id"].astype(str).tolist() if not sales_cut.empty else []
     twins_cut = filter_twins(
         scored,
         regions=regions,

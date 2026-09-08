@@ -64,3 +64,5 @@ def test_filter_twins_empty_sales_window() -> None:
     assert out.empty
     north = filter_twins(scored, regions=["North"])
     assert list(north["customer_id"]) == ["A"]
+    from_series = filter_twins(scored, sales_ids=pd.Series(["B", "B"]))
+    assert list(from_series["customer_id"]) == ["B"]

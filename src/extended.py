@@ -70,8 +70,12 @@ def resolve_window(
     return DateWindow(start, end, name)
 
 
-def _id_set(values: Iterable[str] | None) -> set[str]:
-    return {str(v).strip() for v in (values or []) if str(v).strip()}
+def _id_set(values: Iterable[str] | pd.Series | None) -> set[str]:
+    if values is None:
+        return set()
+    if isinstance(values, pd.Series):
+        values = values.tolist()
+    return {str(v).strip() for v in values if str(v).strip()}
 
 
 def attach_customer_attrs(sales: pd.DataFrame, customers: pd.DataFrame) -> pd.DataFrame:
